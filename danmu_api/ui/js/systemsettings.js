@@ -309,7 +309,26 @@ async function importSystemConfigFile(file) {
 
 // 显示清理缓存确认模态框
 function showClearCacheModal() {
+    selectAllCacheItems(true); // 每次打开恢复默认全选
     document.getElementById('clear-cache-modal').classList.add('active');
+}
+
+// 批量勾选或取消勾选所有缓存项，并同步已选数量
+function selectAllCacheItems(checked) {
+    document.querySelectorAll('#clear-cache-modal input[name="cacheItem"]').forEach(cb => {
+        cb.checked = checked;
+    });
+    updateCacheClearCount();
+}
+
+// 刷新清理缓存弹窗中已勾选项的数量统计
+function updateCacheClearCount() {
+    const all = document.querySelectorAll('#clear-cache-modal input[name="cacheItem"]');
+    const checked = document.querySelectorAll('#clear-cache-modal input[name="cacheItem"]:checked');
+    const countEl = document.getElementById('cache-clear-count');
+    if (countEl) {
+        countEl.textContent = '已选 ' + checked.length + ' / ' + all.length;
+    }
 }
 
 // 隐藏清理缓存确认模态框
@@ -319,6 +338,14 @@ function hideClearCacheModal() {
 
 // 确认清理缓存
 async function confirmClearCache() {
+    // 收集勾选的缓存项
+    const checkboxes = document.querySelectorAll('#clear-cache-modal input[name="cacheItem"]:checked');
+    const items = Array.from(checkboxes).map(cb => cb.value);
+    if (items.length === 0) {
+        customAlert('请至少选择一项要清理的缓存');
+        return;
+    }
+
     // 检查部署平台配置
     const configCheck = await checkDeployPlatformConfig();
     if (!configCheck.success) {
@@ -332,12 +359,13 @@ async function confirmClearCache() {
     addLog('开始清理缓存', 'info');
 
     try {
-        // 调用真实的清理缓存API
+        // 调用真实的清理缓存API，附带勾选的待清理项
         const response = await fetch(buildApiUrl('/api/cache/clear', true), { // 使用admin token
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
-            }
+            },
+            body: JSON.stringify({ items })
         });
 
         const result = await response.json();
@@ -868,6 +896,8 @@ function renderValueInput(item) {
 
         container.innerHTML = \`
             <label>映射配置</label>
+            <textarea id="map-bulk-value" rows="6" placeholder="原值->映射值;原值2->映射值2">\${escapeHtml(value || '')}</textarea>
+            <button type="button" class="btn btn-secondary" onclick="parseBulkMapItems()">解析并更新列表</button>
             <div class="map-container" id="map-container">
                 \${mapItems.map((item, index) => \`
                     <div class="map-item" data-index="\${index}">
@@ -886,6 +916,8 @@ function renderValueInput(item) {
             </div>
             <button type="button" class="btn btn-primary" onclick="addMapItem()">添加映射项</button>
         \`;
+
+        bindMapInputSync();
 
     } else {
         // 文本输入
@@ -973,9 +1005,9 @@ function renderValueInput(item) {
                         </div>
                     </div>
                     <div style="margin-bottom: 10px; display: flex; align-items: center; width: 100%;">
-                        <label class="offset-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 0; white-space: nowrap;">
+                        <label class="offset-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 0;">
                             启用百分比模式（按视频时长缩放全部弹幕时间）
-                            <input type="checkbox" id="offset-use-percent" style="width: 16px; height: 16px; margin: 0; flex-shrink: 0;">
+                            <input type="checkbox" id="offset-use-percent" class="app-checkbox">
                         </label>
                     </div>
                     \${offsetSources.length > 0 ? \`
@@ -1589,11 +1621,19 @@ function updateTagStates() {
     if (!editingKeyName) return;
 
     const currentKey = editingKeyName;
+    const isMergeSourcePairs = currentKey === 'MERGE_SOURCE_PAIRS';
+    const preventDuplicateSources = currentKey === 'SOURCE_ORDER' || currentKey === 'PLATFORM_ORDER';
     // 1. 获取当前暂存区中的Token (防止同组内重复)
     const stagingTokens = new Set(stagingTags);
     
     // 2. 获取已确认的 Selected Tags (仅在非合并模式下需要检查)
     const selectedTagElements = getSelectedTagElements();
+    // PLATFORM_ORDER 的已选项可能是 dandan&animeko，需要将组合拆开后再判断源是否已添加。
+    const selectedSourceTokens = new Set(
+        selectedTagElements.flatMap(element =>
+            String(element.dataset.value || '').split('&').map(value => value.trim()).filter(Boolean)
+        )
+    );
 
     // 3. 更新所有可选项的状态
     const availableTags = document.querySelectorAll('.available-tag');
@@ -1603,15 +1643,17 @@ function updateTagStates() {
 
         if (isMergeMode) {
             // [合并模式逻辑]
-            // 只要不在当前的暂存区中，就可以选（允许 bilibili&a 和 bilibili&b）
-            // 也就是说，我们完全不检查 selectedTagElements
-            if (stagingTokens.has(value)) {
+            // SOURCE_ORDER / PLATFORM_ORDER 中已经添加过的源不能再次加入。
+            // MERGE_SOURCE_PAIRS 保留同一源参与不同合并组的能力。
+            if (stagingTokens.has(value) || (preventDuplicateSources && selectedSourceTokens.has(value))) {
                 shouldDisable = true;
             }
         } else {
             // [普通模式逻辑]
-            // 只要已经被选了，就禁用 (精准匹配)
-            const isAlreadySelected = selectedTagElements.some(el => el.dataset.value === value);
+            // 排序配置按组成源判断，其他多选配置保持完整值精准匹配。
+            const isAlreadySelected = preventDuplicateSources
+                ? selectedSourceTokens.has(value)
+                : selectedTagElements.some(el => el.dataset.value === value);
             if (isAlreadySelected) {
                 shouldDisable = true;
             }
@@ -1634,6 +1676,8 @@ function updateTagStates() {
 function addSelectedTag(element) {
     const value = element.dataset.value;
 
+    if (element.classList.contains('disabled')) return;
+
     if (isMergeMode) {
         if (!stagingTags.includes(value)) {
             stagingTags.push(value);
@@ -1642,8 +1686,6 @@ function addSelectedTag(element) {
         }
         return;
     }
-
-    if (element.classList.contains('disabled')) return;
     
     const container = document.getElementById('selected-tags');
 
@@ -2583,6 +2625,7 @@ document.getElementById('env-form').addEventListener('submit', async function(e)
         itemData = { key, value, description, type, options };
     } else if (type === 'map') {
         // 获取映射表值
+        parseBulkMapItems(true);
         const mapItems = document.querySelectorAll('#map-container .map-item');
         const pairs = [];
         mapItems.forEach(item => {
@@ -2664,6 +2707,29 @@ document.getElementById('env-form').addEventListener('submit', async function(e)
     }
 });
 
+function parseBulkMapItems(silent = false) {
+    const input = document.getElementById('map-bulk-value');
+    const container = document.getElementById('map-container');
+    if (!input || !container) return false;
+    const latest = new Map(); const invalid = [];
+    String(input.value || '').split(/[;\\r\\n]+/).forEach((raw, index) => {
+        const text = raw.trim(); if (!text) return;
+        const pos = text.indexOf('->');
+        if (pos < 1 || !text.slice(pos + 2).trim()) { invalid.push(index + 1); return; }
+        latest.set(text.slice(0, pos).trim(), text.slice(pos + 2).trim());
+    });
+    container.querySelectorAll('.map-item').forEach(item => item.remove());
+    for (const [left, right] of latest) {
+        const row = document.createElement('div'); row.className = 'map-item';
+        row.innerHTML = '<input type="text" class="map-input-left"><span class="map-separator">-&gt;</span><input type="text" class="map-input-right"><button type="button" class="btn btn-danger map-remove-btn" onclick="removeMapItem(this)">删除</button>';
+        row.querySelector('.map-input-left').value = left;
+        row.querySelector('.map-input-right').value = right;
+        container.insertBefore(row, container.querySelector('.map-item-template'));
+    }
+    if (invalid.length && !silent) addLog('Invalid mapping entries ignored: ' + invalid.join(', '), 'warning');
+    return invalid.length === 0;
+}
+
 // 添加映射项
 function addMapItem() {
     const container = document.getElementById('map-container');
@@ -2675,6 +2741,8 @@ function addMapItem() {
     const index = container.querySelectorAll('.map-item').length;
     newItem.setAttribute('data-index', index);
     container.appendChild(newItem);
+    newItem.querySelectorAll('.map-input-left, .map-input-right').forEach(input => input.addEventListener('input', syncBulkMapValue));
+    syncBulkMapValue();
 }
 
 // 删除映射项
@@ -2682,7 +2750,24 @@ function removeMapItem(button) {
     const item = button.closest('.map-item');
     if (item) {
         item.remove();
+        syncBulkMapValue();
     }
+}
+
+function syncBulkMapValue() {
+    const input = document.getElementById('map-bulk-value');
+    if (!input) return;
+    input.value = Array.from(document.querySelectorAll('#map-container .map-item')).map(item => {
+        const l = item.querySelector('.map-input-left')?.value.trim();
+        const r = item.querySelector('.map-input-right')?.value.trim();
+        return l && r ? l + '->' + r : '';
+    }).filter(Boolean).join(';');
+}
+
+function bindMapInputSync() {
+    document.querySelectorAll('#map-container .map-input-left, #map-container .map-input-right').forEach(input => {
+        input.addEventListener('input', syncBulkMapValue);
+    });
 }
 /* ========================================
    Bilibili Cookie 扫码登录功能
@@ -2996,6 +3081,11 @@ function toggleMapping(btnEl) {
     }
 }
 
+// 最近数据分页状态
+const RECENT_DATA_PAGE_SIZE = 5;
+let recentAnimeCacheData = []; // 最近数据完整缓存
+let recentAnimeDisplayedCount = 0; // 最近数据已显示条数
+
 // 快捷数据面板业务逻辑
 async function fetchAndShowRecentData() {
     const panel = document.getElementById('recent-data-panel');
@@ -3016,6 +3106,8 @@ async function fetchAndShowRecentData() {
         const result = await response.json();
 
         if (result.success && result.data && result.data.length > 0) {
+            recentAnimeCacheData = result.data;
+            recentAnimeDisplayedCount = 0;
             renderAnimeCachePanel(result.data, listContainer);
         } else {
             listContainer.innerHTML = '<div class="text-gray font-size-12" style="padding: 10px 0;">缓存中暂无番剧数据，请先通过客户端请求弹幕接口以生成缓存。</div>';
@@ -3033,29 +3125,34 @@ function renderAnimeCachePanel(data, listContainer) {
 
     // 内部辅助函数：生成操作按钮
     const generateButtons = (title, source) => {
+        const safeTitle = escapeHtml(title);
+        const safeSource = escapeHtml(source);
         if (currentKey === 'CUSTOM_MERGE_RULES') {
             return \`
                 <div style="display:flex;flex-direction:column;gap:4px;">
-                    <button type="button" class="btn btn-sm btn-xs" onclick="fillMergeEntity('sec', '\${title}', '\${source}')">设为副</button>
-                    <button type="button" class="btn btn-sm btn-primary btn-xs" onclick="fillMergeEntity('prim', '\${title}', '\${source}')">设为主</button>
+                    <button type="button" class="btn btn-sm btn-xs" data-fill-action="merge-sec" data-fill-title="\${safeTitle}" data-fill-source="\${safeSource}">设为副</button>
+                    <button type="button" class="btn btn-sm btn-primary btn-xs" data-fill-action="merge-prim" data-fill-title="\${safeTitle}" data-fill-source="\${safeSource}">设为主</button>
                 </div>
             \`;
         } else if (currentKey === 'DANMU_OFFSET') {
             return \`
-                <button type="button" class="btn btn-sm btn-primary btn-xs" onclick="fillOffsetEntity('\${title}', '\${source}')">填入</button>
+                <button type="button" class="btn btn-sm btn-primary btn-xs" data-fill-action="offset" data-fill-title="\${safeTitle}" data-fill-source="\${safeSource}">填入</button>
             \`;
         }
         return '';
     };
 
     // 内部辅助函数：清洗标题
-    const cleanTitleStr = (rawTitle) => rawTitle.replace(/\\s*from\\s+.*$/i, '').trim().replace(/'/g, '&apos;');
+    const cleanTitleStr = (rawTitle) => rawTitle.replace(/\\s*from\\s+.*$/i, '').trim();
 
-    let html = '<div class="anime-cache-list">';
+    const nextCount = Math.min(recentAnimeDisplayedCount + RECENT_DATA_PAGE_SIZE, data.length);
+    const newItems = data.slice(recentAnimeDisplayedCount, nextCount);
 
-    data.forEach(item => {
+    let html = recentAnimeDisplayedCount === 0 ? '<div class="anime-cache-list">' : '';
+
+    newItems.forEach(item => {
         const cleanTitle = cleanTitleStr(item.animeTitle);
-        const coverStyle = item.imageUrl ? \`background-image: url('\${item.imageUrl}');\` : '';
+        const coverHtml = item.imageUrl ? \`<img class="anime-cache-cover" src="\${escapeHtml(item.imageUrl)}" alt="" referrerpolicy="no-referrer" loading="lazy">\` : '<div class="anime-cache-cover"></div>';
 
         // 1. 构建合并子源模块
         let childrenHtml = '';
@@ -3065,7 +3162,7 @@ function renderAnimeCachePanel(data, listContainer) {
             const childItems = item.mergedChildren.map(child => {
                 const childCleanTitle = cleanTitleStr(child.animeTitle);
 
-                const childCoverStyle = child.imageUrl ? \`background-image: url('\${child.imageUrl}');\` : '';
+                const childCoverHtml = child.imageUrl ? \`<img class="anime-cache-child-cover" src="\${escapeHtml(child.imageUrl)}" alt="" referrerpolicy="no-referrer" loading="lazy">\` : '<div class="anime-cache-child-cover"></div>';
 
                 // 解析映射数据并按匹配状态排序
                 let mappingHtml = '';
@@ -3081,8 +3178,8 @@ function renderAnimeCachePanel(data, listContainer) {
 
                         let mainSide = '(主源越界)';
                         if (hasMainMatch) {
-                            const cleanMainEpTitle = (link.title || '未知剧集').replace(/^【.*?】\\s*/, '').replace(/'/g, '&apos;').replace(/"/g, '&quot;');
-                            mainSide = \`【\${item.source}】\${cleanMainEpTitle}\`;
+                            const cleanMainEpTitle = escapeHtml((link.title || '未知剧集').replace(/^【.*?】\\s*/, ''));
+                            mainSide = \`【\${escapeHtml(item.source)}】\${cleanMainEpTitle}\`;
                         }
 
                         let childSide = '(副源缺失)';
@@ -3100,13 +3197,13 @@ function renderAnimeCachePanel(data, listContainer) {
                                 if (child.links && child.links.length > 0) {
                                     const childLink = child.links.find(l => String(l.url) === String(childId));
                                     if (childLink && childLink.title) {
-                                        childTitleStr = childLink.title.replace(/^【.*?】\\s*/, '').replace(/'/g, '&apos;').replace(/"/g, '&quot;');
+                                        childTitleStr = childLink.title.replace(/^【.*?】\\s*/, '');
                                     }
                                 }
                             } else {
-                                childTitleStr = (link.title || '').replace(/^【.*?】\\s*/, '').replace(/'/g, '&apos;').replace(/"/g, '&quot;');
+                                childTitleStr = (link.title || '').replace(/^【.*?】\\s*/, '');
                             }
-                            childSide = \`【\${child.source}】\${childTitleStr}\`;
+                            childSide = \`【\${escapeHtml(child.source)}】\${escapeHtml(childTitleStr)}\`;
                             
                             const numMatch = childTitleStr.match(/\\d+/);
                             if (numMatch) {
@@ -3154,10 +3251,10 @@ function renderAnimeCachePanel(data, listContainer) {
                 return \`
                     <div class="anime-cache-child-item">
                         <div class="anime-cache-child-main">
-                            <div class="anime-cache-child-cover" style="\${childCoverStyle}"></div>
+                            \${childCoverHtml}
                             <div class="anime-cache-child-info">
-                                <div class="anime-cache-child-title" title="\${child.animeTitle}">\${childCleanTitle}</div>
-                                <div class="anime-cache-meta">[\${child.source}] (\${child.episodes}集)</div>
+                                <div class="anime-cache-child-title" title="\${escapeHtml(child.animeTitle)}">\${escapeHtml(childCleanTitle)}</div>
+                                <div class="anime-cache-meta">[\${escapeHtml(child.source)}] (\${child.episodes}集)</div>
                             </div>
                             <div class="anime-cache-child-actions">
                                 \${generateButtons(childCleanTitle, child.source)}
@@ -3181,7 +3278,7 @@ function renderAnimeCachePanel(data, listContainer) {
         if (item.links && item.links.length > 0) {
             episodesCount = item.links.length;
             const epItems = item.links.map(link => {
-                const safeTitle = link.title ? link.title.replace(/'/g, '&apos;').replace(/"/g, '&quot;') : '未知剧集';
+                const safeTitle = link.title ? escapeHtml(link.title) : '未知剧集';
                 return \`
                     <div class="anime-cache-child-item" style="padding: 6px;">
                         <div class="anime-cache-child-main">
@@ -3217,10 +3314,10 @@ function renderAnimeCachePanel(data, listContainer) {
         html += \`
             <div class="anime-cache-card">
                 <div class="anime-cache-card-body">
-                    <div class="anime-cache-cover" style="\${coverStyle}"></div>
+                    \${coverHtml}
                     <div class="anime-cache-info">
-                        <div class="anime-cache-title" title="\${item.animeTitle}">\${cleanTitle}</div>
-                        <div class="anime-cache-meta">[\${item.source}] (\${item.episodes}集)</div>
+                        <div class="anime-cache-title" title="\${escapeHtml(item.animeTitle)}">\${escapeHtml(cleanTitle)}</div>
+                        <div class="anime-cache-meta">[\${escapeHtml(item.source)}] (\${item.episodes}集)</div>
                     </div>
                     <div class="anime-cache-actions">
                         \${generateButtons(cleanTitle, item.source)}
@@ -3233,8 +3330,40 @@ function renderAnimeCachePanel(data, listContainer) {
         \`;
     });
 
-    html += '</div>';
-    listContainer.innerHTML = html;
+    if (recentAnimeDisplayedCount === 0) {
+        html += '</div>';
+        listContainer.innerHTML = html;
+    } else {
+        const listEl = listContainer.querySelector('.anime-cache-list');
+        if (listEl) listEl.insertAdjacentHTML('beforeend', html);
+    }
+
+    recentAnimeDisplayedCount = nextCount;
+    updateRecentDataLoadMore(listContainer, data.length, nextCount);
+}
+
+// 更新最近数据加载更多按钮
+function updateRecentDataLoadMore(listContainer, total, displayed) {
+    let loadMoreBtn = listContainer.querySelector('.recent-data-load-more');
+    if (displayed < total) {
+        if (!loadMoreBtn) {
+            loadMoreBtn = document.createElement('button');
+            loadMoreBtn.type = 'button';
+            loadMoreBtn.className = 'btn btn-primary btn-sm recent-data-load-more';
+            loadMoreBtn.onclick = loadMoreRecentData;
+            listContainer.appendChild(loadMoreBtn);
+        }
+        loadMoreBtn.textContent = '加载更多 (' + displayed + '/' + total + ')';
+    } else if (loadMoreBtn) {
+        loadMoreBtn.remove();
+    }
+}
+
+// 加载更多最近数据
+function loadMoreRecentData() {
+    const listContainer = document.getElementById('recent-data-list');
+    if (!listContainer) return;
+    renderAnimeCachePanel(recentAnimeCacheData, listContainer);
 }
 
 /* ========================================
@@ -3247,7 +3376,6 @@ function applyInputFeedback(inputEl) {
     const oldBorder = inputEl.style.borderColor;
     inputEl.style.borderColor = '#28a745';
     setTimeout(() => inputEl.style.borderColor = oldBorder, 800);
-    inputEl.focus();
 }
 
 // 表单填充逻辑：合并映射表
@@ -3297,4 +3425,20 @@ function fillOffsetEntity(title, source) {
         applyInputFeedback(inputEl);
     }
 }
+
+// 处理最近数据面板快捷填入按钮的点击
+document.addEventListener('click', function(e) {
+    const btn = e.target.closest('[data-fill-action]');
+    if (!btn) return;
+    const action = btn.dataset.fillAction;
+    const title = btn.dataset.fillTitle;
+    const source = btn.dataset.fillSource;
+    if (action === 'offset') {
+        fillOffsetEntity(title, source);
+    } else if (action === 'merge-sec') {
+        fillMergeEntity('sec', title, source);
+    } else if (action === 'merge-prim') {
+        fillMergeEntity('prim', title, source);
+    }
+});
 `;
